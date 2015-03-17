@@ -1,0 +1,28 @@
+{
+  "name": "trong/adobehds",
+  "description": "A PHP script to download Adobe HDS streams",
+  "type": "library",
+  "authors": [
+    {
+      "name": "K-S-V"
+    },
+    {
+      "name": "jashandeep-sohi"
+    },
+    {
+      "name": "Madison Vadim"
+    }
+  ],
+  "license": "Apache 2.0",
+  "require": {
+    "php": ">=5.3.3"
+  },
+  "autoload": {
+    "psr-4": {
+      "AdobeHDS\\": "src"
+    }
+  },
+  "bin": [
+    "bin/adobehds"
+  ]
+}

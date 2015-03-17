@@ -1,0 +1,299 @@
+#!/usr/bin/env php
+<?php
+
+require __DIR__ . '/bootstrap.php';
+
+define('AUDIO', 0x08);
+define('VIDEO', 0x09);
+define('SCRIPT_DATA', 0x12);
+define('FRAME_TYPE_INFO', 0x05);
+define('CODEC_ID_AVC', 0x07);
+define('CODEC_ID_AAC', 0x0A);
+define('AVC_SEQUENCE_HEADER', 0x00);
+define('AAC_SEQUENCE_HEADER', 0x00);
+define('AVC_NALU', 0x01);
+define('AVC_SEQUENCE_END', 0x02);
+define('FRAMEFIX_STEP', 40);
+define('INVALID_TIMESTAMP', -1);
+define('STOP_PROCESSING', 2);
+
+define('SCRIPT_VERSION', "1.1.1");
+
+
+// Global code starts here
+$format = " %-8s%-16s%-16s%-8s";
+$baseFilename = "";
+//$debug = false;
+$duration = 0;
+$delete = false;
+$fileExt = ".f4f";
+$fileCount = 1;
+$filesize = 0;
+$fixWindow = 1000;
+$fragCount = 0;
+$fragNum = 0;
+$manifest = "";
+$maxSpeed = 0;
+$metadata = true;
+$outDir = "";
+$outFile = "";
+$play = false;
+$referrer = "";
+$rename = false;
+$start = 0;
+
+$options = array(
+    0 => array(
+        'help' => 'displays this help',
+        'debug' => 'show debug output',
+        'delete' => 'delete fragments after processing',
+        'fproxy' => 'force proxy for downloading of fragments',
+        'play' => 'dump stream to stdout for piping to media player',
+        'rename' => 'rename fragments sequentially before processing',
+        'version' => 'display script version',
+    ),
+    1 => array(
+        'auth' => 'authentication string for fragment requests',
+        'duration' => 'stop recording after specified number of seconds',
+        'filesize' => 'split output file in chunks of specified size (MB)',
+        'fragments' => 'base filename for fragments',
+        'fixwindow' => 'timestamp gap between frames to consider as timeshift',
+        'manifest' => 'manifest file for downloading of fragments',
+        'maxspeed' => 'maximum bandwidth consumption (KB) for fragment downloading',
+        'outdir' => 'destination folder for output file',
+        'outfile' => 'filename to use for output file',
+        'parallel' => 'number of fragments to download simultaneously',
+        'proxy' => 'proxy for downloading of manifest',
+        'quality' => 'selected quality level (low|medium|high) or exact bitrate',
+        'referrer' => 'Referer to use for emulation of browser requests',
+        'start' => 'start from specified fragment',
+        'useragent' => 'User-Agent to use for emulation of browser requests',
+        'forwarded' => 'Hostname to forward for (X-Forwarded-For HTTP header)',
+    )
+);
+$cli = new AdobeHDS\CLI($argc, $argv, $options, true);
+
+// Set large enough memory limit
+ini_set("memory_limit", "512M");
+
+// Check if STDOUT is available
+if ($cli->getParam('play')) {
+    $play = true;
+    \AdobeHDS\Utils::$quiet = true;
+    \AdobeHDS\Utils::$showHeader = false;
+}
+if ($cli->getParam('help')) {
+    $cli->displayHelp();
+    exit(0);
+}
+
+if ($cli->getParam('version')) {
+    \AdobeHDS\Utils::LogInfo(sprintf("Version %s", SCRIPT_VERSION));
+    exit(0);
+}
+
+
+// Check for required extensions
+$required_extensions = array(
+    "bcmath",
+    "curl",
+    "SimpleXML"
+);
+$missing_extensions = array_diff($required_extensions, get_loaded_extensions());
+if ($missing_extensions) {
+    $msg = "You have to install the following extension(s) to continue: '" . implode("', '", $missing_extensions) . "'";
+    \AdobeHDS\Utils::LogError($msg);
+}
+
+// Initialize classes
+$cc = new \AdobeHDS\cURL();
+$f4f = new \AdobeHDS\F4F();
+
+// Process command line options
+if (isset($cli->params['unknown']))
+    $baseFilename = $cli->params['unknown'][0];
+if ($cli->getParam('debug'))
+    \AdobeHDS\Utils::$debug = true;
+if ($cli->getParam('delete'))
+    $delete = true;
+if ($cli->getParam('fproxy'))
+    $cc->fragProxy = true;
+if ($cli->getParam('rename'))
+    $rename = $cli->getParam('rename');
+if ($cli->getParam('auth'))
+    $f4f->auth = '?' . $cli->getParam('auth');
+if ($cli->getParam('duration'))
+    $duration = $cli->getParam('duration');
+if ($cli->getParam('filesize'))
+    $filesize = $cli->getParam('filesize');
+if ($cli->getParam('fixwindow'))
+    $fixWindow = $cli->getParam('fixwindow');
+if ($cli->getParam('fragments'))
+    $baseFilename = $cli->getParam('fragments');
+if ($cli->getParam('manifest'))
+    $manifest = $cli->getParam('manifest');
+if ($cli->getParam('maxspeed'))
+    $maxSpeed = $cli->getParam('maxspeed');
+if ($cli->getParam('outdir'))
+    $outDir = $cli->getParam('outdir');
+if ($cli->getParam('outfile'))
+    $outFile = $cli->getParam('outfile');
+if ($cli->getParam('parallel'))
+    $f4f->parallel = $cli->getParam('parallel');
+if ($cli->getParam('proxy'))
+    $cc->proxy = $cli->getParam('proxy');
+if ($cli->getParam('quality'))
+    $f4f->quality = $cli->getParam('quality');
+if ($cli->getParam('referrer'))
+    $referrer = $cli->getParam('referrer');
+if ($cli->getParam('start'))
+    $start = $cli->getParam('start');
+if ($cli->getParam('useragent'))
+    $cc->user_agent = $cli->getParam('useragent');
+
+// f4f options
+$f4f->baseFilename =& $baseFilename;
+$f4f->debug = \AdobeHDS\Utils::$debug;
+$f4f->fixWindow =& $fixWindow;
+$f4f->format =& $format;
+$f4f->metadata =& $metadata;
+$f4f->outDir =& $outDir;
+$f4f->outFile =& $outFile;
+$f4f->play =& $play;
+$f4f->rename =& $rename;
+
+// Use custom referrer
+if ($referrer)
+    $cc->headers[] = "Referer: " . $referrer;
+
+// X-Forwareded-For header
+if ($cli->getParam('forwarded'))
+    $cc->headers[] = "X-Forwarded-For: " . gethostbyname($cli->getParam("forwarded"));
+
+// Set overall maximum bandwidth for fragment downloading
+if ($maxSpeed > 0) {
+    $cc->maxSpeed = ($maxSpeed * 1024) / $f4f->parallel;
+    \AdobeHDS\Utils::LogDebug(sprintf("Setting maximum speed to %.2f KB per fragment (overall $maxSpeed KB)", $cc->maxSpeed / 1024));
+}
+
+// Create output directory
+if ($outDir) {
+    $outDir = rtrim(str_replace('\\', '/', $outDir));
+    if (!file_exists($outDir)) {
+        \AdobeHDS\Utils::LogDebug("Creating destination directory " . $outDir);
+        if (!mkdir($outDir, 0777, true))
+            \AdobeHDS\Utils::LogError("Failed to create destination directory " . $outDir);
+    }
+}
+
+// Remove existing file extension
+if ($outFile)
+    $outFile = \AdobeHDS\Utils::RemoveExtension($outFile);
+
+// Disable filesize when piping
+if ($play)
+    $filesize = 0;
+
+// Disable metadata if it invalidates the stream duration
+if ($start or $duration or $filesize)
+    $metadata = false;
+
+// Download fragments when manifest is available
+if ($manifest) {
+    $manifest = \AdobeHDS\Utils::AbsoluteUrl("http://", $manifest);
+    $opt = array(
+        'start' => $start,
+        'tDuration' => $duration,
+        'filesize' => $filesize
+    );
+    $f4f->DownloadFragments($cc, $manifest, $opt);
+}
+
+// Determine output filename
+if (!$outFile) {
+    $baseFilename = str_replace('\\', '/', $baseFilename);
+    $lastChar = substr($baseFilename, -1);
+    if ($baseFilename and !(($lastChar == '/') or ($lastChar == ':'))) {
+        $lastSlash = strrpos($baseFilename, '/');
+        if ($lastSlash)
+            $outFile = substr($baseFilename, $lastSlash + 1);
+        else
+            $outFile = $baseFilename;
+    } else
+        $outFile = "Joined";
+    $outFile = \AdobeHDS\Utils::RemoveExtension($outFile);
+}
+
+// Check for available fragments and rename if required
+if ($f4f->fragNum)
+    $fragNum = $f4f->fragNum;
+else if ($start)
+    $fragNum = $start - 1;
+if ($rename) {
+    \AdobeHDS\Utils::RenameFragments($baseFilename, $fragNum, $fileExt);
+    $fragNum = 0;
+}
+$count = $fragNum + 1;
+while (true) {
+    if (file_exists($baseFilename . $count) or file_exists($baseFilename . $count . $fileExt))
+        $fragCount++;
+    else
+        break;
+    $count++;
+}
+\AdobeHDS\Utils::LogInfo("Found $fragCount fragments");
+
+if (!$f4f->processed) {
+    // Process available fragments
+    if ($fragCount < 1)
+        exit(1);
+    $timeStart = microtime(true);
+    \AdobeHDS\Utils::LogDebug("Joining Fragments:");
+    for ($i = $fragNum + 1; $i <= $fragNum + $fragCount; $i++) {
+        $file = $baseFilename . $i;
+        if (file_exists($file))
+            $frag = file_get_contents($file);
+        else if (file_exists($file . $fileExt))
+            $frag = file_get_contents($file . $fileExt);
+        if (!isset($opt['flv'])) {
+            $opt['debug'] = false;
+            $f4f->InitDecoder();
+            $f4f->DecodeFragment($frag, $i, $opt);
+            if ($filesize)
+                $opt['flv'] = \AdobeHDS\Utils::WriteFlvFile(\AdobeHDS\Utils::JoinUrl($outDir, $outFile . '-' . $fileCount++ . ".flv"), $f4f->audio, $f4f->video);
+            else
+                $opt['flv'] = \AdobeHDS\Utils::WriteFlvFile(\AdobeHDS\Utils::JoinUrl($outDir, $outFile . ".flv"), $f4f->audio, $f4f->video);
+            if ($metadata)
+                \AdobeHDS\Utils::WriteMetadata($f4f, $opt['flv']);
+
+            $opt['debug'] = \AdobeHDS\Utils::$debug;
+            $f4f->InitDecoder();
+        }
+        $f4f->DecodeFragment($frag, $i, $opt);
+        if ($filesize and ($f4f->filesize >= $filesize)) {
+            $f4f->filesize = 0;
+            fclose($opt['flv']);
+            unset($opt['flv']);
+        }
+        \AdobeHDS\Utils::LogInfo("Processed " . ($i - $fragNum) . " fragments", true);
+    }
+    if (isset($opt['flv']))
+        fclose($opt['flv']);
+    $timeEnd = microtime(true);
+    $timeTaken = sprintf("%.2f", $timeEnd - $timeStart);
+    \AdobeHDS\Utils::LogInfo("Joined $fragCount fragments in $timeTaken seconds");
+}
+
+// Delete fragments after processing
+if ($delete) {
+    for ($i = $fragNum + 1; $i <= $fragNum + $fragCount; $i++) {
+        $file = $baseFilename . $i;
+        if (file_exists($file))
+            unlink($file);
+        else if (file_exists($file . $fileExt))
+            unlink($file . $fileExt);
+    }
+}
+
+\AdobeHDS\Utils::LogInfo("Finished");
+
