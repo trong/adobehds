@@ -3,10 +3,16 @@ adobehds
 
 A PHP script to download Adobe HDS streams. Forked from K-S-V.
 
+Installation
+-----
+```
+composer require "trong/adobehds:1.1.*"
+```
+
 Usage
 -----
 ```
-$ php adobehds.php --help
+$ vendor/bin/adobehds --help
 
 KSV Adobe HDS Downloader
 
